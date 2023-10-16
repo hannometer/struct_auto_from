@@ -4,7 +4,7 @@ use darling::FromField;
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::quote;
-use syn::{parse_macro_input, Expr, Field, ItemStruct, Meta, MetaList};
+use syn::{parse_macro_input, Expr, Field, Generics, ItemStruct, Meta, MetaList, Path, Type};
 
 /// Auto implement `From` trait.
 ///
@@ -86,30 +86,42 @@ use syn::{parse_macro_input, Expr, Field, ItemStruct, Meta, MetaList};
 ///
 #[proc_macro_attribute]
 pub fn auto_from(attrs: TokenStream, input: TokenStream) -> TokenStream {
-    let from = parse_macro_input!(attrs as Ident);
+    let from = parse_macro_input!(attrs as Path);
 
     let into = parse_macro_input!(input as ItemStruct);
+
+    construct_from_tokenstream(from, into)
+}
+
+fn construct_from_tokenstream(from: Path, into: ItemStruct) -> TokenStream {
     let ImplData {
         raw_into,
         into,
+        generics,
         fields,
+        array_fields,
         default_fields,
         default_values,
     } = ImplData::from_parsed_input(into);
 
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
     let tokens = quote! {
         #raw_into
 
-        impl From<#from> for #into {
-            fn from(value: #from) -> Self {
+        impl #impl_generics From<#from #ty_generics> for #into #ty_generics #where_clause {
+
+            fn from(value: #from #ty_generics) -> Self {
                 Self {
                     #(
-                        #fields: value.#fields
-                    ),*
-                    ,
+                        #fields: value.#fields.into(),
+                    )*
                     #(
-                        #default_fields: #default_values
-                    ),*
+                         #array_fields: core::array::from_fn(|i| value.#array_fields[i].into()),
+                    )*
+                    #(
+                        #default_fields: #default_values,
+                    )*
                 }
             }
         }
@@ -118,10 +130,27 @@ pub fn auto_from(attrs: TokenStream, input: TokenStream) -> TokenStream {
     tokens.into()
 }
 
+#[proc_macro_attribute]
+pub fn auto_from_ns(attrs: TokenStream, input: TokenStream) -> TokenStream {
+    let from_ns = parse_macro_input!(attrs as Path);
+
+    let into = parse_macro_input!(input as ItemStruct);
+
+    let into_ident = into.ident.clone();
+    let from = {
+        let tok = quote!(#from_ns::#into_ident).into();
+        parse_macro_input!(tok as Path)
+    };
+
+    construct_from_tokenstream(from, into)
+}
+
 struct ImplData {
     raw_into: ItemStruct,
     into: Ident,
+    generics: Generics,
     fields: Vec<Ident>,
+    array_fields: Vec<Ident>,
     default_fields: Vec<Ident>,
     default_values: Vec<Expr>,
 }
@@ -134,17 +163,27 @@ impl ImplData {
             Self::extract_defaults_from_input(&mut raw_into)
                 .into_iter()
                 .unzip();
+        let array_fields = input
+            .fields
+            .iter()
+            .filter(|f| matches!(f.ty, Type::Array(_)))
+            .filter_map(|f| f.ident.clone())
+            .collect();
         let fields = input
             .fields
             .into_iter()
+            .filter(|f| !matches!(f.ty, Type::Array(_)))
             .filter_map(|f| f.ident)
             .filter(|i| !default_fields.contains(i))
             .collect();
+        let generics = input.generics;
 
         Self {
             raw_into,
             into,
+            generics,
             fields,
+            array_fields,
             default_fields,
             default_values,
         }
@@ -168,7 +207,7 @@ impl ImplData {
     fn remove_attrs(field: &mut Field) {
         field.attrs.retain(|a| {
             let Meta::List(MetaList { path, .. }) = &a.meta else {
-                return false
+                return false;
             };
 
             !path.is_ident(&Ident::new("auto_from_attr", Span::call_site()))
