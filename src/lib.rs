@@ -106,22 +106,53 @@ fn construct_from_tokenstream(from: Path, into: ItemStruct) -> TokenStream {
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let tokens = quote! {
-        #raw_into
+    let tokens = if array_fields.is_empty() {
+        quote! {
+            #raw_into
 
-        impl #impl_generics From<#from #ty_generics> for #into #ty_generics #where_clause {
+            impl #impl_generics From<#from #ty_generics> for #into #ty_generics #where_clause {
 
-            fn from(value: #from #ty_generics) -> Self {
-                Self {
+                fn from(value: #from #ty_generics) -> Self {
+                    Self {
+                        #(
+                            #fields: value.#fields.into(),
+                        )*
+                        #(
+                             #array_fields: core::array::from_fn(|i| value.#array_fields[i].into()),
+                        )*
+                        #(
+                            #default_fields: #default_values,
+                        )*
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {
+            #raw_into
+
+            impl #impl_generics From<#from #ty_generics> for #into #ty_generics #where_clause {
+
+                fn from(value: #from #ty_generics) -> Self {
+                    let mut out = Self {
+                        #(
+                            #fields: value.#fields.into(),
+                        )*
+                        #(
+                             #array_fields: unsafe{ core::mem::zeroed() },
+                        )*
+                        #(
+                            #default_fields: #default_values,
+                        )*
+                    };
                     #(
-                        #fields: value.#fields.into(),
+                        assert_eq!(out.#array_fields.len(), value.#array_fields.len());
+                        out.#array_fields
+                        .iter_mut()
+                        .zip(value.#array_fields.iter())
+                        .for_each(|(l, r)| *l = (*r).into());
                     )*
-                    #(
-                         #array_fields: core::array::from_fn(|i| value.#array_fields[i].into()),
-                    )*
-                    #(
-                        #default_fields: #default_values,
-                    )*
+                    out
                 }
             }
         }
